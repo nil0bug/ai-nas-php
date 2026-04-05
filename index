@@ -1,0 +1,261 @@
+<?php
+$baseDir = '/var/www/html';
+$file = $baseDir . '/data.json';
+$uploadDir = '/icons/';
+$bgFile = $baseDir . '/backgrounds/daily.jpg';
+
+if (!is_dir($baseDir . $uploadDir)) mkdir($baseDir . $uploadDir, 0755, true);
+if (!is_dir($baseDir . '/backgrounds/')) mkdir($baseDir . '/backgrounds/', 0755, true);
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_GET['action'])) {
+    header('Content-Type: application/json');
+    $raw = file_get_contents('php://input');
+
+    if ($_GET['action'] === 'save') {
+        $decoded = json_decode($raw, true);
+        if (json_last_error() !== JSON_ERROR_NONE || !is_array($decoded)) {
+            echo json_encode(['status' => 'error']); exit;
+        }
+
+        // ✅ 核心修复：eMMC 防重复读写优化
+        $oldRaw = file_exists($file) ? file_get_contents($file) : '';
+        if ($raw === $oldRaw) {
+            echo json_encode(['status' => 'no_change']); 
+            exit; // 数据未变，直接返回，保护磁盘
+        }
+
+        file_put_contents($file, $raw, LOCK_EX);
+        echo json_encode(['status' => 'ok']);
+    } 
+    elseif ($_GET['action'] === 'fetch_icon') {
+        $target = json_decode($raw, true)['url'] ?? '';
+        if (!preg_match('~^https?://~i', $target)) {
+            $target = (preg_match('/^\d+$/', $target)) ? 'http://127.0.0.1:' . $target : 'http://' . $target;
+        }
+        $opts = ['http'=>['header'=>"User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64)\r\n",'timeout'=>8], 'ssl'=>["verify_peer"=>false,"verify_peer_name"=>false]];
+        $ctx = stream_context_create($opts);
+        $html = @file_get_contents($target, false, $ctx);
+        $p = parse_url($target);
+        $baseUrl = ($p['scheme']??'http') . '://' . ($p['host']??'') . (isset($p['port'])?':'.$p['port']:'');
+        $ico = '';
+        if ($html) {
+            if (preg_match('/<link.*?rel=["\'](?:apple-touch-icon|icon|shortcut icon)["\'].*?href=["\'](.*?)["\']/i', $html, $m)) $ico = $m[1];
+        }
+        if (!$ico) $ico = $baseUrl . '/favicon.ico';
+        if ($ico && !preg_match('~^https?://|data:~i', $ico)) {
+            if (strpos($ico, '//') === 0) $ico = ($p['scheme']??'http') . ':' . $ico;
+            elseif (strpos($ico, '/') === 0) $ico = $baseUrl . $ico;
+            else $ico = rtrim($target, '/') . '/' . $ico;
+        }
+        $img = @file_get_contents($ico, false, $ctx);
+        if ($img) {
+            $n = 'fav_'.time().'.png';
+            file_put_contents($baseDir.$uploadDir.$n, $img);
+            echo json_encode(['status' => 'ok', 'path' => $uploadDir.$n]);
+        } else { echo json_encode(['status' => 'error']); }
+        exit;
+    }
+    elseif ($_GET['action'] === 'upload') {
+        if (isset($_FILES['image'])) {
+            $n = 'up_'.time().'.'.pathinfo($_FILES['image']['name'], PATHINFO_EXTENSION);
+            if(move_uploaded_file($_FILES['image']['tmp_name'], $baseDir . $uploadDir . $n)) {
+                echo json_encode(['status' => 'ok', 'path' => $uploadDir . $n]);
+            }
+        }
+        exit;
+    }
+    elseif ($_GET['action'] === 'update_bg') {
+        $api = "https://www.bing.com/HPImageArchive.aspx?format=js&idx=0&n=1&mkt=zh-CN";
+        $d = json_decode(@file_get_contents($api), true);
+        if (isset($d['images'][0]['url'])) {
+            $img = @file_get_contents("https://www.bing.com" . $d['images'][0]['url']);
+            if ($img) { file_put_contents($bgFile, $img); echo json_encode(['status' => 'ok']); exit; }
+        }
+        echo json_encode(['status' => 'error']); exit;
+    }
+    exit;
+}
+$db = [["name" => "默认", "items" => []]];
+if (file_exists($file)) $db = json_decode(file_get_contents($file), true) ?: $db;
+?>
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>ARM Dashboard</title>
+    <style>
+        :root { --glass: rgba(255, 255, 255, 0.92); --accent: #007bff; --danger: #ff4d4f; }
+        body { margin: 0; font-family: system-ui; min-height: 100vh; background: url('/backgrounds/daily.jpg?t=<?=time()?>') no-repeat center center fixed; background-size: cover; user-select: none; overflow-x: hidden; }
+        body::before { content: ''; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.1); backdrop-filter: blur(15px); z-index: -1; }
+        .navbar { position: fixed; top: 0; width: 100%; height: 60px; background: var(--glass); display: flex; align-items: center; padding: 0 15px; box-sizing: border-box; z-index: 100; box-shadow: 0 2px 10px rgba(0,0,0,0.05); }
+        .tabs { display: flex; gap: 8px; overflow-x: auto; flex: 1; scrollbar-width: none; }
+        .tab { cursor: pointer; padding: 6px 18px; border-radius: 20px; font-size: 13px; background: rgba(0,0,0,0.05); white-space: nowrap; font-weight: bold; transition: 0.2s; }
+        .tab.active { background: var(--accent); color: white; }
+        .container { max-width: 1000px; margin: 80px auto; padding: 0 15px; }
+        .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(95px, 1fr)); gap: 15px; }
+        .card { background: var(--glass); border-radius: 20px; text-align: center; padding: 15px 5px; cursor: pointer; border: 2.3px solid transparent; transition: all 0.2s; position: relative; }
+        body.edit-mode .card:not(.edit-ready) { animation: shake 0.3s infinite alternate; }
+        @keyframes shake { from { transform: rotate(-0.8deg); } to { transform: rotate(0.8deg); } }
+        .card.selected { border-color: var(--danger); background: rgba(255,77,79,0.1); }
+        .edit-badge { position: absolute; top: -6px; right: -6px; width: 26px; height: 26px; background: var(--accent); color: white; border-radius: 50%; display: none; align-items: center; justify-content: center; font-size: 14px; border: 2px solid white; z-index: 11; }
+        .card.edit-ready .edit-badge { display: flex; }
+        .card.edit-ready { animation: none !important; border-color: var(--accent); transform: scale(1.05); z-index: 10; }
+        .card img { width: 45px; height: 45px; border-radius: 12px; margin-bottom: 5px; pointer-events: none; object-fit: cover; }
+        .card span { display: block; font-size: 12px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #222; pointer-events: none; }
+        .modal { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.4); z-index: 1000; align-items: center; justify-content: center; backdrop-filter: blur(8px); }
+        .modal-content { background: white; padding: 25px; border-radius: 28px; width: 85%; max-width: 350px; }
+        .form-group { margin-bottom: 15px; }
+        .form-group label { display: block; font-size: 11px; color: #999; margin: 0 0 5px 5px; font-weight: bold; }
+        .form-group input { width: 100%; padding: 12px; border: 1px solid #f0f0f0; border-radius: 14px; box-sizing: border-box; outline: none; background: #f9f9f9; }
+        .btn { border: none; padding: 11px 18px; border-radius: 14px; cursor: pointer; font-weight: bold; font-size: 13px; transition: 0.2s; }
+        .btn:disabled { opacity: 0.5; }
+        .btn-p { background: var(--accent); color: white; }
+        .btn-s { background: #f2f2f2; color: #555; }
+        .btn-d { background: var(--danger); color: white; }
+        #adminPanel { display: none; background: var(--glass); padding: 15px; border-radius: 22px; margin-bottom: 20px; gap: 10px; border: 1px solid rgba(255,255,255,0.5); }
+    </style>
+</head>
+<body onclick="cancelEdit(event)">
+
+<div class="navbar">
+    <div class="tabs" id="tabBar"></div>
+    <div style="display:flex; gap:8px;">
+        <button class="btn btn-s" id="modeBtn" onclick="toggleEditMode()">管理</button>
+        <button class="btn btn-d" id="delBtn" style="display:none" onclick="batchDelConfirm()">删除</button>
+    </div>
+</div>
+
+<div class="container">
+    <div id="adminPanel">
+        <button class="btn btn-p" onclick="openIconModal(true)">+ 图标</button>
+        <button class="btn btn-s" onclick="openFolderMgr()">分栏</button>
+        <button class="btn btn-s" onclick="updateWallpaper()">更新壁纸</button>
+    </div>
+    <div class="grid" id="iconGrid"></div>
+</div>
+
+<div class="modal" id="uiModal"><div class="modal-content" id="uiModalBody"></div></div>
+
+<script>
+    let db = <?php echo json_encode($db); ?>;
+    let activeIdx = parseInt(localStorage.getItem('activeIdx')) || 0;
+    let isEditMode = false;
+    let selectedIdxs = new Set();
+    let dragIdx = null;
+    let pressTimer;
+    let editingIdx = null;
+
+    function renderTabs() {
+        const bar = document.getElementById('tabBar');
+        bar.innerHTML = db.map((f, i) => `<div class="tab ${i===activeIdx?'active':''}" onclick="switchFolder(${i})" ondblclick="openFolderRenameModal(${i})">${f.name}</div>`).join('') + `<div class="tab" onclick="openAddFolderModal()">+</div>`;
+    }
+
+    function renderIcons() {
+        const grid = document.getElementById('iconGrid');
+        grid.innerHTML = (db[activeIdx]?.items || []).map((item, idx) => `
+            <div class="card ${selectedIdxs.has(idx)?'selected':''} ${editingIdx===idx?'edit-ready':''}" 
+                 draggable="${isEditMode && editingIdx === null}"
+                 ondragstart="handleDS(${idx})" ondragover="event.preventDefault()" ondrop="handleDrop(${idx})" ondragend="this.classList.remove('dragging')"
+                 onclick="handleIconClick(event, ${idx})" 
+                 onmousedown="startP(${idx})" onmouseup="clearP()" 
+                 ontouchstart="startP(${idx})" ontouchend="clearP()">
+                <div class="edit-badge">✎</div>
+                <img src="${item.icon}"><span>${item.name}</span>
+            </div>
+        `).join('');
+        const delBtn = document.getElementById('delBtn');
+        if(delBtn) {
+            delBtn.style.display = (isEditMode && selectedIdxs.size > 0) ? 'block' : 'none';
+            delBtn.innerText = `删除(${selectedIdxs.size})`;
+        }
+    }
+
+    function showError(msg) {
+        showUI(`<h3>提示</h3><p>${msg}</p><button class="btn btn-p" style="width:100%" onclick="closeUI()">知道了</button>`);
+    }
+
+    // --- 分栏管理逻辑：删除/移动后不关闭弹窗 ---
+    function openFolderMgr() {
+        const list = db.map((f, i) => `
+            <div style="display:flex;align-items:center;justify-content:space-between;padding:10px;background:#f9f9f9;border-radius:12px;margin-bottom:8px">
+                <span style="font-weight:bold;font-size:14px">${f.name}</span>
+                <div style="display:flex;gap:5px">
+                    <button class="btn btn-s" style="padding:5px 10px" onclick="moveF(${i},-1)">↑</button>
+                    <button class="btn btn-s" style="padding:5px 10px" onclick="moveF(${i},1)">↓</button>
+                    <button class="btn btn-d" style="padding:5px 10px" onclick="confirmDelFolder(${i})">删</button>
+                </div>
+            </div>`).join('');
+        showUI(`<h3>分栏管理</h3><div style="max-height:300px;overflow-y:auto;margin-bottom:15px">${list}</div><button class="btn btn-s" style="width:100%" onclick="closeUI()">关闭</button>`);
+    }
+
+    async function actDelFolder(i) {
+        db.splice(i, 1);
+        if (activeIdx >= db.length) activeIdx = db.length - 1;
+        localStorage.setItem('activeIdx', activeIdx);
+        await saveDB();
+        renderTabs(); renderIcons();
+        openFolderMgr(); // 保持开启
+    }
+
+    async function moveF(i, dir) {
+        const t = i + dir; if (t < 0 || t >= db.length) return;
+        const cur = db[activeIdx];
+        [db[i], db[t]] = [db[t], db[i]];
+        activeIdx = db.indexOf(cur);
+        localStorage.setItem('activeIdx', activeIdx);
+        await saveDB();
+        renderTabs(); openFolderMgr(); 
+    }
+
+    // --- 分栏/图标逻辑拦截 ---
+    function openAddFolderModal() { 
+        if(db.length >= 10) return showError("分栏数量已达上限 (10个)");
+        showUI(`<h3>添加分栏</h3><div class="form-group"><label>分栏名称</label><input type="text" id="fn" maxlength="5" placeholder="请输入名称"></div><div style="display:flex;gap:10px"><button class="btn btn-s" style="flex:1" onclick="closeUI()">取消</button><button class="btn btn-p" style="flex:1" onclick="actAddFolder()">确定</button></div>`); 
+    }
+    function actAddFolder() { 
+        const n = document.getElementById('fn').value.trim(); if(!n) return;
+        if(db.some(f => f.name === n)) return showError(`分栏名 [${n}] 已存在`);
+        db.push({name:n, items:[]}); activeIdx = db.length-1; saveRefresh(); 
+    }
+    function actRenameFolder(i) { 
+        const n = document.getElementById('fn').value.trim(); if(!n || n === db[i].name) return closeUI();
+        if(db.some((f, idx) => f.name === n && idx !== i)) return showError(`分栏名 [${n}] 已存在`);
+        db[i].name = n; saveRefresh(); 
+    }
+
+    async function saveIcon(isNew, idx) {
+        const n = document.getElementById('mN').value.trim(), u = document.getElementById('mU').value.trim(), p = document.getElementById('tP').value;
+        if(!n || !u) return;
+        if(db[activeIdx].items.some((it, i) => it.name === n && i !== idx)) return showError(`当前分栏已存在 [${n}]`);
+        if(isNew) db[activeIdx].items.push({name:n, url:u, icon:p});
+        else db[activeIdx].items[idx] = {name:n, url:u, icon:p};
+        saveRefresh();
+    }
+
+    // --- 交互基础 ---
+    function startP(idx) { if(!isEditMode) return; pressTimer = setTimeout(() => { editingIdx = idx; renderIcons(); }, 650); }
+    function clearP() { clearTimeout(pressTimer); }
+    function cancelEdit(e) { if (!e.target.closest('.card') && editingIdx !== null) { editingIdx = null; renderIcons(); } }
+    function handleIconClick(e, idx) { e.stopPropagation(); if (isEditMode) { if (editingIdx === idx) { openIconModal(false, idx); editingIdx = null; return; } selectedIdxs.has(idx) ? selectedIdxs.delete(idx) : selectedIdxs.add(idx); renderIcons(); } else { const item = db[activeIdx].items[idx]; let url = item.url; if (/^\d+$/.test(url)) url = window.location.protocol + '//' + window.location.hostname + ':' + url; else if (!url.includes('://')) url = 'http://' + url; window.open(url, '_blank'); } }
+    function handleDS(idx) { if(!isEditMode || editingIdx !== null) return; dragIdx = idx; event.target.classList.add('dragging'); }
+    async function handleDrop(targetIdx) { if(!isEditMode || dragIdx === null || dragIdx === targetIdx) return; const items = db[activeIdx].items; const moved = items.splice(dragIdx, 1)[0]; items.splice(targetIdx, 0, moved); dragIdx = null; renderIcons(); await saveDB(); }
+    function openIconModal(isNew, idx = null) { const item = isNew ? {name:'', url:'', icon:'/icons/default.png'} : db[activeIdx].items[idx]; showUI(`<h3>${isNew?'添加':'编辑'}图标</h3><img id="pI" src="${item.icon}" style="width:50px;height:50px;display:block;margin:0 auto 15px;background:#f8f8f8;padding:10px;border-radius:15px;object-fit:cover"><input type="hidden" id="tP" value="${item.icon}"><div class="form-group"><label>名称 (5字)</label><input type="text" id="mN" value="${item.name}" maxlength="5"></div><div class="form-group"><label>链接/端口</label><div style="display:flex;gap:5px"><input type="text" id="mU" value="${item.url}" style="flex:1"><button class="btn btn-s" id="fBtn" onclick="autoFetch()">抓取</button></div></div><div class="form-group"><label>上传图片</label><input type="file" id="mF" accept="image/*" onchange="uploadFile()"></div><div style="display:flex;gap:10px"><button class="btn btn-s" style="flex:1" onclick="closeUI()">取消</button><button class="btn btn-p" id="saveBtn" style="flex:1" onclick="saveIcon(${isNew},${idx})">保存</button></div>`); }
+    async function uploadFile() { const f = document.getElementById('mF').files[0]; if(!f) return; setModalLoading(true); const fd = new FormData(); fd.append('image', f); try { const res = await fetch('?action=upload',{method:'POST',body:fd}); const d = await res.json(); if(d.status==='ok'){ document.getElementById('pI').src = d.path; document.getElementById('tP').value = d.path; } } finally { setModalLoading(false); } }
+    async function autoFetch() { const u = document.getElementById('mU').value.trim(); if(!u) return; setModalLoading(true); try { const res = await fetch('?action=fetch_icon',{method:'POST',body:JSON.stringify({url:u})}); const d = await res.json(); if(d.status==='ok'){ document.getElementById('pI').src = d.path; document.getElementById('tP').value = d.path; } } finally { setModalLoading(false); } }
+    function setModalLoading(isLoading) { const btn = document.getElementById('saveBtn'); const fBtn = document.getElementById('fBtn'); if(btn) btn.disabled = isLoading; if(fBtn) fBtn.innerText = isLoading ? "..." : "抓取"; }
+    function openFolderRenameModal(i) { showUI(`<h3>改名</h3><div class="form-group"><label>新名称</label><input type="text" id="fn" value="${db[i].name}" maxlength="5"></div><div style="display:flex;gap:10px"><button class="btn btn-s" style="flex:1" onclick="closeUI()">取消</button><button class="btn btn-p" style="flex:1" onclick="actRenameFolder(${i})">保存</button></div>`); }
+    function confirmDelFolder(i) { if(db.length <= 1) return; showUI(`<h3>删除分栏？</h3><p>[${db[i].name}] 及其内所有图标将丢失。</p><div style="display:flex;gap:10px"><button class="btn btn-s" style="flex:1" onclick="openFolderMgr()">取消</button><button class="btn btn-d" style="flex:1" onclick="actDelFolder(${i})">确认</button></div>`); }
+    function batchDelConfirm() { showUI(`<h3>批量删除</h3><p>确认删除选中的 ${selectedIdxs.size} 个图标吗？</p><div style="display:flex;gap:10px"><button class="btn btn-s" style="flex:1" onclick="closeUI()">取消</button><button class="btn btn-d" style="flex:1" onclick="actBatchDel()">确定</button></div>`); }
+    async function actBatchDel() { const sorted = Array.from(selectedIdxs).sort((a,b) => b-a); sorted.forEach(idx => db[activeIdx].items.splice(idx, 1)); selectedIdxs.clear(); saveRefresh(); }
+    async function saveRefresh() { await saveDB(); closeUI(); renderTabs(); renderIcons(); }
+    function showUI(h){ document.getElementById('uiModalBody').innerHTML=h; document.getElementById('uiModal').style.display='flex'; }
+    function closeUI(){ document.getElementById('uiModal').style.display='none'; }
+    function switchFolder(i){ activeIdx=i; localStorage.setItem('activeIdx',i); selectedIdxs.clear(); editingIdx=null; renderTabs(); renderIcons(); }
+    function toggleEditMode(){ isEditMode=!isEditMode; selectedIdxs.clear(); editingIdx=null; document.body.classList.toggle('edit-mode', isEditMode); document.getElementById('adminPanel').style.display=isEditMode?'flex':'none'; document.getElementById('modeBtn').innerText=isEditMode?'完成':'管理'; renderIcons(); }
+    async function updateWallpaper() { const b = event.target; b.innerText = "..."; const res = await fetch('?action=update_bg', {method:'POST'}); if((await res.json()).status==='ok') location.reload(); else b.innerText = "失败"; }
+    async function saveDB(){ await fetch('?action=save',{method:'POST',body:JSON.stringify(db)}); }
+    renderTabs(); renderIcons();
+</script>
+</body>
+</html>

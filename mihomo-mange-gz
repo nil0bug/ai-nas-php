@@ -1,0 +1,281 @@
+<?php
+/**
+ * Server Manager V5.0 - 核心文件操作增强版
+ */
+$paths = [
+    'mihomo_bin'    => '/opt/mihomo/mihomo',
+    'mihomo_config' => '/etc/mihomo/',
+    'geoip'         => '/etc/mihomo/geoip.metadb',
+    'geosite'       => '/etc/mihomo/geosite.dat',
+    'ipv6'          => '/etc/mihomo/china_ipv6.txt',
+    'ui_dir'        => '/var/www/html/dashboard/'
+];
+
+$config_file = './manager_settings.json';
+$settings = file_exists($config_file) ? json_decode(file_get_contents($config_file), true) : ['proxy' => ''];
+
+function downloadWithCurl($url, $proxy) {
+    $ch = curl_init();
+    curl_setopt_array($ch, [
+        CURLOPT_URL => $url,
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_FOLLOWLOCATION => true,
+        CURLOPT_TIMEOUT => 600,
+        CURLOPT_USERAGENT => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        CURLOPT_SSL_VERIFYPEER => false
+    ]);
+    if (!empty($proxy)) curl_setopt($ch, CURLOPT_PROXY, $proxy);
+    $data = curl_exec($ch);
+    $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    curl_close($ch);
+    if ($httpCode === 200 && $data) return $data;
+    throw new Exception("下载失败: HTTP $httpCode");
+}
+
+if (isset($_GET['action'])) {
+    header('Content-Type: application/json');
+    $action = $_GET['action'];
+    $proxy = $settings['proxy'] ?: null;
+    try {
+        // 1. 获取 Release 列表
+        if ($action === 'get_releases') {
+            $repo = $_GET['repo'];
+            $data = downloadWithCurl("https://api.github.com/repos/$repo/releases", $proxy);
+            $res = json_decode($data, true);
+            $output = [];
+            if(is_array($res)){
+                foreach ($res as $rel) {
+                    foreach ($rel['assets'] as $asset) {
+                        $name = $asset['name'];
+                        if ($repo === 'MetaCubeX/mihomo' && strpos($name, 'linux-arm64') !== false && strpos($name, '.gz') !== false) {
+                            $output[] = ['tag' => $rel['tag_name'], 'url' => $asset['browser_download_url'], 'name' => $name];
+                        } else if ($repo === 'MetaCubeX/metacubexd' && strpos($name, 'compressed-dist.tgz') !== false) {
+                            $output[] = ['tag' => $rel['tag_name'], 'url' => $asset['browser_download_url'], 'name' => "UI: $name"];
+                        }
+                    }
+                }
+            }
+            echo json_encode($output);
+        }
+
+        // 2. 更新内核 (GZ -> Binary)
+        if ($action === 'update_bin') {
+            $data = downloadWithCurl($_POST['url'], $proxy);
+            $tmp_gz = "/tmp/mihomo.gz"; $tmp_bin = "/tmp/mihomo_new";
+            file_put_contents($tmp_gz, $data);
+            
+            // 解压并赋予权限
+            exec("gzip -dfc $tmp_gz > $tmp_bin && chmod +x $tmp_bin");
+            
+            // 物理替换流程
+            exec("sudo systemctl stop mihomo 2>/dev/null");
+            exec("sudo rm -f {$paths['mihomo_bin']}");
+            exec("sudo mv $tmp_bin {$paths['mihomo_bin']}");
+            exec("sudo chmod +x {$paths['mihomo_bin']}");
+            exec("sudo systemctl start mihomo");
+            
+            unlink($tmp_gz);
+            echo json_encode(['status' => 'success', 'msg' => '内核更新完成，服务已重启']);
+        }
+
+        // 3. 更新面板 (TGZ -> Dashboard)
+        if ($action === 'update_ui') {
+            $data = downloadWithCurl($_POST['url'], $proxy);
+            $tmp_tgz = "/tmp/ui.tgz";
+            file_put_contents($tmp_tgz, $data);
+            
+            // 确保目录存在并清空
+            if (!is_dir($paths['ui_dir'])) exec("sudo mkdir -p {$paths['ui_dir']}");
+            exec("sudo rm -rf {$paths['ui_dir']}*");
+            
+            // 解压面板文件 (不改 Nginx 配置)
+            exec("sudo tar -xzvf $tmp_tgz -C {$paths['ui_dir']} --strip-components=1", $out, $ret);
+            if ($ret !== 0) exec("sudo tar -xzvf $tmp_tgz -C {$paths['ui_dir']}");
+            
+            exec("sudo chown -R www-data:www-data {$paths['ui_dir']}");
+            unlink($tmp_tgz);
+            echo json_encode(['status' => 'success', 'msg' => '面板文件已替换，刷新 8081 即可查看']);
+        }
+
+        // 4. 服务控制 (仅针对 Mihomo)
+        if ($action === 'service') {
+            $cmd = $_POST['cmd'];
+            exec("sudo systemctl $cmd mihomo");
+            echo json_encode(['status'=>'success', 'msg'=>"Mihomo 服务已执行 $cmd"]);
+        }
+
+        // 5. 规则库同步
+        if ($action === 'update_file') {
+            $urls = ['geoip'=>'https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/geoip.metadb','geosite'=>'https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/geosite.dat','ipv6'=>'https://raw.githubusercontent.com/gaoyifan/china-operator-ip/ip-lists/china6.txt'];
+            $data = downloadWithCurl($urls[$_POST['type']], $proxy);
+            file_put_contents($paths[$_POST['type']], $data);
+            echo json_encode(['status' => 'success', 'msg' => '规则文件已同步']);
+        }
+
+        // 6. 代理保存
+        if ($action === 'save_proxy') {
+            $settings['proxy'] = $_POST['proxy'];
+            file_put_contents($config_file, json_encode($settings));
+            echo json_encode(['status'=>'success', 'msg'=>'代理配置已保存']);
+        }
+    } catch (Exception $e) { echo json_encode(['status' => 'error', 'msg' => $e->getMessage()]); }
+    exit;
+}
+?>
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>Server Manager V5.0</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <style>
+        .sidebar-item.active { background: #2563eb; color: white; box-shadow: 0 8px 20px rgba(37,99,235,0.3); }
+        .tab-pane { display: none; visibility: hidden; position: absolute; width: 100%; pointer-events: none; }
+        .tab-pane.active { display: block; visibility: visible; position: relative; pointer-events: auto; }
+        .tab-pane:not(.active) { height: 0 !important; overflow: hidden !important; padding: 0 !important; }
+        #toast { position: fixed; top: -100px; left: 50%; transform: translateX(-50%); transition: all 0.4s cubic-bezier(0.68, -0.55, 0.265, 1.55); z-index: 9999; }
+        #toast.show { top: 30px; }
+        button:disabled { opacity: 0.6; cursor: not-allowed; }
+    </style>
+</head>
+<body class="flex h-screen bg-slate-50 overflow-hidden font-sans text-slate-800">
+
+    <div id="toast" class="flex items-center gap-3 px-8 py-4 rounded-2xl shadow-2xl bg-white border border-slate-100 min-w-[320px]">
+        <div id="toast-icon" class="w-10 h-10 rounded-full flex items-center justify-center text-white font-bold text-sm"></div>
+        <div class="flex flex-col">
+            <span class="text-[10px] font-black uppercase tracking-widest text-slate-400 leading-none mb-1">系统通知</span>
+            <span id="toast-msg" class="text-sm font-bold text-slate-700 leading-tight">处理中...</span>
+        </div>
+    </div>
+
+    <aside class="w-64 bg-slate-950 text-white flex flex-col shrink-0 z-50 shadow-2xl">
+        <div class="p-8 border-b border-white/5"><h1 class="text-xl font-black italic tracking-tighter uppercase">SERVER<span class="text-blue-500">ULTRA</span></h1></div>
+        <nav class="flex-1 px-4 py-8 space-y-2">
+            <button onclick="showTab('mihomo')" id="btn-mihomo" class="sidebar-item active w-full flex items-center gap-4 px-6 py-4 rounded-2xl transition-all font-bold text-sm uppercase"><i class="fas fa-rocket"></i> Mihomo</button>
+            <button onclick="showTab('alist')" id="btn-alist" class="sidebar-item w-full flex items-center gap-4 px-6 py-4 rounded-2xl text-slate-500 hover:bg-white/5 transition-all font-bold text-sm uppercase"><i class="fas fa-hdd"></i> Alist</button>
+            <div class="pt-4 border-t border-white/5 mt-4">
+                <button onclick="showTab('settings')" id="btn-settings" class="sidebar-item w-full flex items-center gap-4 px-6 py-4 rounded-2xl text-slate-500 hover:bg-white/5 transition-all font-bold text-sm uppercase"><i class="fas fa-cog"></i> Settings</button>
+            </div>
+        </nav>
+    </aside>
+
+    <main class="flex-1 h-screen overflow-y-auto bg-[#f8fafc]">
+        <div class="max-w-6xl mx-auto p-12">
+            
+            <div id="tab-mihomo" class="tab-pane active">
+                <div class="flex justify-between items-center mb-12">
+                    <div>
+                        <h2 class="text-5xl font-black text-slate-900 italic uppercase tracking-tighter">Mihomo <span class="text-blue-600 not-italic">Core</span></h2>
+                        <p class="text-slate-400 mt-2 font-medium text-xs tracking-widest uppercase italic">Pure Kernel & File Management</p>
+                    </div>
+                    <div class="flex gap-3 p-2 bg-white rounded-3xl shadow-sm border border-slate-100">
+                        <button onclick="callAction(this, 'service', {cmd:'start'})" class="px-6 py-3 bg-emerald-500 text-white rounded-2xl font-black hover:bg-emerald-600 transition shadow-lg shadow-emerald-100">启动</button>
+                        <button onclick="callAction(this, 'service', {cmd:'restart'})" class="px-6 py-3 bg-slate-800 text-white rounded-2xl font-black transition">重启</button>
+                        <button onclick="callAction(this, 'service', {cmd:'stop'})" class="px-6 py-3 bg-rose-500 text-white rounded-2xl font-black transition">停止</button>
+                    </div>
+                </div>
+
+                <div class="grid grid-cols-1 xl:grid-cols-3 gap-8">
+                    <div class="bg-white p-8 rounded-[2.5rem] shadow-sm border border-slate-100">
+                        <div class="flex justify-between mb-6"><h3 class="font-black text-slate-700 uppercase tracking-widest text-xs">内核升级</h3><button onclick="fetchList(this, 'mihomo')" class="text-blue-600 font-black text-[10px] uppercase bg-blue-50 px-3 py-1 rounded-full">Check</button></div>
+                        <select id="bin-select" class="w-full p-4 bg-slate-50 border-none rounded-2xl text-xs font-mono mb-6 focus:ring-2 ring-blue-500"></select>
+                        <button onclick="updateBinary(this)" class="w-full py-4 bg-blue-600 text-white font-black rounded-2xl shadow-xl shadow-blue-100 hover:-translate-y-1 transition-all text-xs uppercase">替换内核并重启</button>
+                    </div>
+                    <div class="bg-white p-8 rounded-[2.5rem] shadow-sm border border-slate-100">
+                        <div class="flex justify-between mb-6"><h3 class="font-black text-slate-700 uppercase tracking-widest text-xs">面板更新</h3><button onclick="fetchList(this, 'ui')" class="text-indigo-600 font-black text-[10px] uppercase bg-indigo-50 px-3 py-1 rounded-full">Check</button></div>
+                        <select id="ui-select" class="w-full p-4 bg-slate-50 border-none rounded-2xl text-xs font-mono mb-6 focus:ring-2 ring-indigo-500"></select>
+                        <button onclick="updateUI(this)" class="w-full py-4 bg-indigo-600 text-white font-black rounded-2xl shadow-xl shadow-indigo-100 hover:-translate-y-1 transition-all text-xs uppercase">更新面板文件</button>
+                    </div>
+                    <div class="bg-white p-8 rounded-[2.5rem] shadow-sm border border-slate-100">
+                        <h3 class="font-black text-slate-700 uppercase tracking-widest text-xs mb-6">数据库同步</h3>
+                        <div class="space-y-3">
+                            <button onclick="callAction(this, 'update_file', {type:'geoip'})" class="w-full p-4 bg-slate-50 border rounded-2xl text-xs font-black text-slate-600 flex justify-between items-center hover:border-blue-400 transition">GeoIP <i class="fas fa-database text-blue-400"></i></button>
+                            <button onclick="callAction(this, 'update_file', {type:'geosite'})" class="w-full p-4 bg-slate-50 border rounded-2xl text-xs font-black text-slate-600 flex justify-between items-center hover:border-indigo-400 transition">GeoSite <i class="fas fa-globe text-indigo-400"></i></button>
+                            <button onclick="callAction(this, 'update_file', {type:'ipv6'})" class="w-full p-4 bg-blue-50 text-blue-600 rounded-2xl text-xs font-black flex justify-between items-center">China_IPv6 <i class="fas fa-network-wired"></i></button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div id="tab-alist" class="tab-pane">
+                <div class="h-[60vh] flex flex-col items-center justify-center text-center">
+                    <div class="w-20 h-20 bg-slate-100 rounded-full flex items-center justify-center mb-6 text-slate-300 animate-pulse"><i class="fas fa-tools text-2xl"></i></div>
+                    <h2 class="text-xl font-black text-slate-800 uppercase italic tracking-tighter">Alist <span class="text-blue-500 font-bold">Module</span></h2>
+                </div>
+            </div>
+
+            <div id="tab-settings" class="tab-pane">
+                <h2 class="text-5xl font-black text-slate-900 italic uppercase mb-12">Network <span class="text-blue-600">Settings</span></h2>
+                <div class="max-w-xl bg-white p-10 rounded-[3rem] shadow-sm border border-slate-100">
+                    <label class="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-4">管理后台下载代理</label>
+                    <input type="text" id="proxy-input" value="<?php echo $settings['proxy']; ?>" class="w-full p-5 bg-slate-50 border-none rounded-2xl font-mono text-blue-600 text-sm focus:ring-2 ring-blue-500" placeholder="http://127.0.0.1:7890">
+                    <button onclick="callAction(this, 'save_proxy', {proxy:document.getElementById('proxy-input').value})" class="mt-8 px-10 py-4 bg-slate-950 text-white font-black rounded-2xl shadow-2xl transition-all">保存配置</button>
+                </div>
+            </div>
+
+        </div>
+    </main>
+
+    <script>
+        function notify(msg, type = 'success') {
+            const toast = document.getElementById('toast');
+            const icon = document.getElementById('toast-icon');
+            const msgEl = document.getElementById('toast-msg');
+            msgEl.innerText = msg;
+            icon.className = `w-10 h-10 rounded-full flex items-center justify-center text-white shadow-lg ${type === 'success' ? 'bg-emerald-500' : 'bg-rose-500'}`;
+            icon.innerHTML = type === 'success' ? '<i class="fas fa-check"></i>' : '<i class="fas fa-times"></i>';
+            toast.classList.add('show');
+            setTimeout(() => toast.classList.remove('show'), 3000);
+        }
+
+        async function callAction(btn, action, data = {}) {
+            const originalHTML = btn.innerHTML;
+            btn.disabled = true;
+            btn.innerHTML = '<i class="fas fa-circle-notch fa-spin text-[10px]"></i>';
+            const fd = new FormData();
+            for (let k in data) fd.append(k, data[k]);
+            try {
+                const r = await fetch(`?action=${action}`, {method: 'POST', body: fd});
+                const d = await r.json();
+                notify(d.msg, d.status);
+            } catch (e) { notify('请求出错', 'error'); }
+            btn.disabled = false; btn.innerHTML = originalHTML;
+        }
+
+        function showTab(id) {
+            document.querySelectorAll('.tab-pane').forEach(p => p.classList.remove('active'));
+            document.querySelectorAll('.sidebar-item').forEach(b => b.classList.remove('active'));
+            document.getElementById('tab-' + id).classList.add('active');
+            document.getElementById('btn-' + id).classList.add('active');
+        }
+
+        async function fetchList(btn, type) {
+            const repo = (type === 'mihomo') ? 'MetaCubeX/mihomo' : 'MetaCubeX/metacubexd';
+            btn.disabled = true;
+            const original = btn.innerHTML;
+            btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i>';
+            try {
+                const res = await fetch(`?action=get_releases&repo=${repo}`);
+                const data = await res.json();
+                const select = document.getElementById(type === 'mihomo' ? 'bin-select' : 'ui-select');
+                select.innerHTML = data.map(item => `<option value="${item.url}">${item.tag} - ${item.name}</option>`).join('');
+                notify(`抓取成功 (${data.length})`);
+            } catch (e) { notify('GitHub 获取失败', 'error'); }
+            btn.disabled = false; btn.innerHTML = original;
+        }
+
+        function updateBinary(btn) {
+            const url = document.getElementById('bin-select').value;
+            if(!url) return notify('请先获取版本', 'error');
+            callAction(btn, 'update_bin', {url: url});
+        }
+
+        function updateUI(btn) {
+            const url = document.getElementById('ui-select').value;
+            if(!url) return notify('请先获取版本', 'error');
+            callAction(btn, 'update_ui', {url: url});
+        }
+    </script>
+</body>
+</html>

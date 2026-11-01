@@ -37,29 +37,71 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_GET['action'])) {
         $baseUrl = ($p['scheme']??'http') . '://' . ($p['host']??'') . (isset($p['port'])?':'.$p['port']:'');
         $icons = [];
         if ($html) {
-            if (preg_match_all('/<link.*?rel=["\']([^"\']*icon[^"\']*)["\'].*?href=["\'](.*?)["\']/i', $html, $matches)) {
-                foreach ($matches[2] as $ico) {
-                    $fullUrl = resolveUrl($ico, $baseUrl, $target);
-                    if ($fullUrl) $icons[] = $fullUrl;
+            if (preg_match_all('/<link\b[^>]*>/i', $html, $linkTags)) {
+                foreach ($linkTags[0] as $tag) {
+                    if (!preg_match('/\brel\s*=\s*["\']([^"\']*icon[^"\']*)["\']/i', $tag, $relM)) continue;
+                    if (!preg_match('/\bhref\s*=\s*["\']([^"\']+)["\']/i', $tag, $hrefM)) continue;
+                    $href = html_entity_decode(trim($hrefM[1]), ENT_QUOTES);
+                    $fullUrl = trim(resolveUrl($href, $baseUrl, $target));
+                    if ($fullUrl !== '') $icons[] = $fullUrl;
                 }
             }
         }
         $icons[] = $baseUrl . '/favicon.ico';
-        $icons = array_values(array_unique($icons));
+        $icons = array_values(array_unique(array_filter($icons, fn($u) => is_string($u) && trim($u) !== '')));
         echo json_encode(['status' => 'ok', 'icons' => $icons]);
         exit;
     }
     elseif ($_GET['action'] === 'download_icon') {
         $url = json_decode($raw, true)['url'] ?? '';
-        if (!$url) { echo json_encode(['status' => 'error']); exit; }
-        $opts = ['http'=>['header'=>"User-Agent: Mozilla/5.0\r\n",'timeout'=>8], 'ssl'=>["verify_peer"=>false,"verify_peer_name"=>false]];
-        $ctx = stream_context_create($opts);
-        $img = @file_get_contents($url, false, $ctx);
-        if ($img) {
-            $uniqueName = 'fav_' . substr(md5($url), 0, 8) . '_' . time() . '_' . bin2hex(random_bytes(4)) . '.png';
-            file_put_contents($baseDir.$uploadDir.$uniqueName, $img);
-            echo json_encode(['status' => 'ok', 'path' => $uploadDir.$uniqueName]);
-        } else { echo json_encode(['status' => 'error']); }
+        if (!$url) { echo json_encode(['status' => 'error', 'msg' => 'empty url']); exit; }
+
+        $img = false;
+
+        if (preg_match('~^data:image/[a-zA-Z0-9.+-]+;base64,~i', $url)) {
+            $comma = strpos($url, ',');
+            $b64 = $comma !== false ? substr($url, $comma + 1) : '';
+            $img = base64_decode($b64, true);
+        }
+        elseif (preg_match('~^data:image/[a-zA-Z0-9.+-]+,(.+)$~is', $url, $m)) {
+            $img = rawurldecode($m[1]);
+        }
+        else {
+            $url = preg_replace_callback('/(?:%[0-9a-f]{2})|[^\x21-\x7e]/i', function ($m) {
+                return (isset($m[0][0]) && $m[0][0] === '%') ? $m[0] : rawurlencode($m[0]);
+            }, $url);
+
+            $opts = ['http' => [
+                'header' => "User-Agent: Mozilla/5.0\r\nAccept: image/*,*/*;q=0.8\r\n",
+                'timeout' => 10,
+                'follow_location' => 1,
+                'max_redirects' => 3
+            ], 'ssl' => ["verify_peer" => false, "verify_peer_name" => false]];
+            $ctx = stream_context_create($opts);
+            $img = @file_get_contents($url, false, $ctx, 0, 5 * 1024 * 1024);
+        }
+
+        if (!$img || strlen($img) === 0) {
+            echo json_encode(['status' => 'error', 'msg' => 'download failed']); exit;
+        }
+
+        $ext = 'png';
+        $info = @getimagesizefromstring($img);
+        if ($info && !empty($info[2])) {
+            $typeMap = [1 => 'gif', 2 => 'jpg', 3 => 'png', 6 => 'bmp', 17 => 'ico', 18 => 'webp'];
+            if (isset($typeMap[$info[2]])) $ext = $typeMap[$info[2]];
+        } else {
+            $head = ltrim(substr($img, 0, 512));
+            if (stripos($head, '<svg') !== false || stripos($head, '<?xml') === 0) $ext = 'svg';
+            elseif (substr($img, 0, 4) === "\x00\x00\x01\x00") $ext = 'ico';
+            else { echo json_encode(['status' => 'error', 'msg' => 'not an image']); exit; }
+        }
+
+        $uniqueName = 'fav_' . substr(md5($url), 0, 8) . '_' . time() . '_' . bin2hex(random_bytes(4)) . '.' . $ext;
+        if (@file_put_contents($baseDir . $uploadDir . $uniqueName, $img) === false) {
+            echo json_encode(['status' => 'error', 'msg' => 'write failed']); exit;
+        }
+        echo json_encode(['status' => 'ok', 'path' => $uploadDir . $uniqueName]);
         exit;
     }
     elseif ($_GET['action'] === 'upload') {
@@ -128,14 +170,15 @@ upgradeStructure($db);
         .section-header.draggable:active { cursor: grabbing; }
         .section-header.dragging { opacity: 0.4; }
         
-        /* ✅ 区块标题样式 */
         .section-title { font-size: 15px; font-weight: 700; color: #fff; text-shadow: 0 1px 3px rgba(0,0,0,0.3); letter-spacing: 0.5px; pointer-events: auto; cursor: pointer; }
 
         .section-actions { display: flex; gap: 8px; }
         .btn-icon { background: rgba(255,255,255,0.2); border: none; color: white; width: 28px; height: 28px; border-radius: 50%; cursor: pointer; display: flex; align-items: center; justify-content: center; font-size: 14px; backdrop-filter: blur(4px); transition: 0.2s; }
         .btn-icon:hover { background: rgba(255,255,255,0.4); }
         
-        .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(90px, 1fr)); gap: 15px; min-height: 120px; }
+        .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(90px, 1fr)); gap: 15px; min-height: 120px; transition: padding 0.15s; }
+        /* 拖拽时网格判定区向下延伸一行，使满行时能拖入下一行位置 */
+        body.dragging-item .grid, body.dragging-section .grid { padding-bottom: 100px; }
         .folder-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 8px; min-height: 120px; }
         .folder-grid .card { padding: 10px 2px; border-radius: 16px; }
         .folder-grid .card span { font-size: 11px; line-height: 1.2; }
@@ -154,8 +197,6 @@ upgradeStructure($db);
 
         .drop-target { outline: 3px dashed var(--accent) !important; outline-offset: -3px; background: rgba(0, 123, 255, 0.15) !important; }
         .card.dragging, .section-header.dragging { opacity: 0.4; }
-        .section-bottom-drop { height: 30px; margin-top: 10px; border: 2px dashed transparent; border-radius: 12px; transition: all 0.2s; }
-        .section-bottom-drop.drop-target { border-color: var(--accent) !important; background: rgba(0, 123, 255, 0.1) !important; }
         .marquee { position: fixed; border: 2px dashed var(--accent); background: rgba(0, 123, 255, 0.1); z-index: 999; pointer-events: none; display: none; }
 
         .folder-icon-preview { width: 45px; height: 45px; display: grid; grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 1fr; gap: 3px; padding: 4px; background: rgba(255,255,255,0.9); border-radius: 12px; box-sizing: border-box; margin: 0 auto 5px; pointer-events: none; }
@@ -254,6 +295,8 @@ upgradeStructure($db);
     let pendingEditItem = null; 
     let selectedIds = new Set(); 
     let lastClickedId = null; 
+
+    let pickerStats = null;
     
     let isMarqueeActive = false;
     let marqueeStartX = 0, marqueeStartY = 0;
@@ -362,6 +405,8 @@ upgradeStructure($db);
     }
 
     function renderContent() {
+        // 非移动模式下确保不残留拖拽延伸态
+        if (!isMoveMode) document.body.classList.remove('dragging-item', 'dragging-section');
         const ctx = getCurrentContext();
         const isRoot = activeFolder === null;
         const container = document.getElementById('contentArea');
@@ -376,11 +421,9 @@ upgradeStructure($db);
             const sectionHeaderDragAttr = isMoveMode ? `draggable="true" ondragstart="handleSectionDS(event, '${section.id}')" ondragend="this.classList.remove('dragging')"` : '';
             const sectionGridDropAttr = isMoveMode ? `ondragover="handleDragOver(event)" ondragleave="handleDragLeave(event)" ondrop="handleDropOnGrid(event, '${section.id}')"` : '';
             const sectionHeaderDropAttr = isMoveMode ? `ondragover="handleDragOver(event)" ondragleave="handleDragLeave(event)" ondrop="handleDropOnSectionHeader(event, '${section.id}')"` : '';
-            const bottomDropAttr = isMoveMode ? `ondragover="handleDragOver(event)" ondragleave="handleDragLeave(event)" ondrop="handleDropAfterSection(event, '${section.id}')"` : '';
 
             html += `<div class="section-block"><div class="section-header ${isMoveMode ? 'draggable' : ''}" id="sec-head-${section.id}" ${sectionHeaderDragAttr} ${sectionHeaderDropAttr}>`;
             
-            // ✅ 区块标题交互：编辑模式双击打开编辑弹窗，任意模式右键打开编辑弹窗
             const titleDblClick = isEditMode ? `ondblclick="event.stopPropagation();editSection('${section.id}')"` : '';
             html += `<span class="section-title" ${titleDblClick} oncontextmenu="event.preventDefault();event.stopPropagation();editSection('${section.id}')">${section.title}</span>`;
             
@@ -415,7 +458,6 @@ upgradeStructure($db);
                 html += `<div class="card add-card" onclick="openAddModalToSection('${section.id}')">+<span>添加</span></div>`;
             }
             html += `</div>`;
-            html += `<div class="section-bottom-drop" ${bottomDropAttr}></div>`;
             html += `</div>`;
         });
 
@@ -431,7 +473,6 @@ upgradeStructure($db);
 
     function showError(msg) { showUI(`<h3 style="margin-top:0;color:var(--danger)">⚠️ 提示</h3><p style="color:#555;line-height:1.5;">${msg}</p><button class="btn btn-p" style="width:100%;margin-top:10px;" onclick="closeUI()">知道了</button>`); }
 
-    // ✅ 移除 Ctrl 逻辑，仅保留 Shift 范围选择和普通多选
     function handleIconClick(e, id) {
         e.stopPropagation();
         if (isMoveMode) return; 
@@ -484,7 +525,6 @@ upgradeStructure($db);
         }
     }
 
-    // ✅ 移除框选时的 Ctrl 判断，每次框选直接清空
     document.addEventListener('mousedown', (e) => {
         if (!isEditMode || isMoveMode) return;
         if (e.button !== 0) return;
@@ -541,18 +581,35 @@ upgradeStructure($db);
         if (btn) { btn.style.display = (isEditMode && selectedIds.size > 0) ? 'block' : 'none'; btn.innerText = `删除(${selectedIds.size})`; }
     }
 
-    function toggleMoveMode() { isMoveMode = !isMoveMode; document.getElementById('moveBtn').classList.toggle('active', isMoveMode); pendingEditItem = null; selectedIds.clear(); renderContent(); }
+    function toggleMoveMode() { 
+        isMoveMode = !isMoveMode; 
+        document.getElementById('moveBtn').classList.toggle('active', isMoveMode); 
+        pendingEditItem = null; selectedIds.clear(); 
+        if (!isMoveMode) document.body.classList.remove('dragging-item', 'dragging-section');
+        renderContent(); 
+    }
     function toggleEditMode() { 
         isEditMode = !isEditMode; 
         if (isEditMode) { isMoveMode = false; document.getElementById('moveBtn').classList.remove('active'); }
+        document.body.classList.remove('dragging-item', 'dragging-section');
         pendingEditItem = null; selectedIds.clear(); 
         document.getElementById('adminPanel').style.display = isEditMode ? 'flex' : 'none'; 
         document.getElementById('modeBtn').innerText = isEditMode ? '完成' : '管理'; 
         renderContent(); 
     }
 
-    function handleItemDS(event, id) { dragType = 'item'; currentlyDraggedId = id; currentlyDraggedSectionId = null; isDropped = false; event.dataTransfer.setData('text/plain', id); event.target.classList.add('dragging'); }
-    function handleSectionDS(event, sectionId) { dragType = 'section'; currentlyDraggedSectionId = sectionId; currentlyDraggedId = null; isDropped = false; event.dataTransfer.setData('text/plain', sectionId); event.currentTarget.classList.add('dragging'); }
+    function handleItemDS(event, id) {
+        dragType = 'item'; currentlyDraggedId = id; currentlyDraggedSectionId = null; isDropped = false;
+        event.dataTransfer.setData('text/plain', id);
+        event.target.classList.add('dragging');
+        document.body.classList.add('dragging-item');
+    }
+    function handleSectionDS(event, sectionId) {
+        dragType = 'section'; currentlyDraggedSectionId = sectionId; currentlyDraggedId = null; isDropped = false;
+        event.dataTransfer.setData('text/plain', sectionId);
+        event.currentTarget.classList.add('dragging');
+        document.body.classList.add('dragging-section');
+    }
 
     function handleDragOver(event) { if (!isMoveMode) return; event.preventDefault(); document.querySelectorAll('.drop-target').forEach(el => el.classList.remove('drop-target')); event.currentTarget.classList.add('drop-target'); }
     function handleDragLeave(event) { event.currentTarget.classList.remove('drop-target'); }
@@ -571,7 +628,9 @@ upgradeStructure($db);
             if (targetType === 'folder') moveSection(draggedId, 'append_to_folder', targetId);
             else moveSection(draggedId, 'before_section', sectionId);
         }
-        clearDropTargets(); renderContent(); saveDB();
+        clearDropTargets();
+        document.body.classList.remove('dragging-item', 'dragging-section');
+        renderContent(); saveDB();
     }
 
     function handleDropOnGrid(event, sectionId) {
@@ -579,15 +638,16 @@ upgradeStructure($db);
         const draggedId = event.dataTransfer.getData('text/plain');
         if (!draggedId) return;
         isDropped = true;
-        if (dragType === 'item') { moveItem(draggedId, 'section', sectionId, null); } 
-        else if (dragType === 'section' && draggedId !== sectionId) {
-            const container = findContainerOfSection(sectionId);
-            if (container) {
-                if (container.id && container.id.startsWith('f_')) moveSection(draggedId, 'append_to_container', 'tab_' + db.indexOf(container), 'tab');
-                else moveSection(draggedId, 'append_to_container', container.id, 'folder');
-            }
+        if (dragType === 'item') {
+            // 拖到网格区域（含延伸出的下一行判定区）→ 追加到该区块末尾
+            moveItem(draggedId, 'section', sectionId, null);
+        } else if (dragType === 'section' && draggedId !== sectionId) {
+            // 区块拖到某个区块的网格区 → 放到该区块之后
+            moveSection(draggedId, 'after_section', sectionId);
         }
-        clearDropTargets(); renderContent(); saveDB();
+        clearDropTargets();
+        document.body.classList.remove('dragging-item', 'dragging-section');
+        renderContent(); saveDB();
     }
 
     function handleDropOnSectionHeader(event, targetSectionId) {
@@ -595,15 +655,9 @@ upgradeStructure($db);
         const draggedId = event.dataTransfer.getData('text/plain');
         if (!draggedId || draggedId === targetSectionId || dragType !== 'section') return;
         isDropped = true; moveSection(draggedId, 'before_section', targetSectionId);
-        clearDropTargets(); renderContent(); saveDB();
-    }
-
-    function handleDropAfterSection(event, targetSectionId) {
-        event.preventDefault(); event.stopPropagation();
-        const draggedId = event.dataTransfer.getData('text/plain');
-        if (!draggedId || draggedId === targetSectionId || dragType !== 'section') return;
-        isDropped = true; moveSection(draggedId, 'after_section', targetSectionId);
-        clearDropTargets(); renderContent(); saveDB();
+        clearDropTargets();
+        document.body.classList.remove('dragging-item', 'dragging-section');
+        renderContent(); saveDB();
     }
 
     function handleDropOnBack(event) {
@@ -613,7 +667,9 @@ upgradeStructure($db);
         isDropped = true;
         if (dragType === 'item') { if (db[activeIdx].sections.length > 0) moveItem(draggedId, 'section', db[activeIdx].sections[0].id, null); } 
         else if (dragType === 'section') { moveSection(draggedId, 'append_to_parent', null); }
-        clearDropTargets(); renderContent(); saveDB();
+        clearDropTargets();
+        document.body.classList.remove('dragging-item', 'dragging-section');
+        renderContent(); saveDB();
     }
 
     function moveItem(draggedId, targetContextType, targetContextId, beforeId) {
@@ -757,7 +813,28 @@ upgradeStructure($db);
         saveRefresh();
     }
 
-    async function uploadFile() { const f = document.getElementById('mF').files[0]; if(!f) return; setModalLoading(true); const fd = new FormData(); fd.append('image', f); try { const res = await fetch('?action=upload',{method:'POST',body:fd}); const d = await res.json(); if(d.status==='ok'){ document.getElementById('pI').src = d.path; document.getElementById('tP').value = d.path; } } finally { setModalLoading(false); } }
+    async function uploadFile() {
+        const f = document.getElementById('mF').files[0];
+        if (!f) return;
+        setModalLoading(true);
+        const fd = new FormData();
+        fd.append('image', f);
+        try {
+            const res = await fetch('?action=upload', { method: 'POST', body: fd });
+            const d = await res.json();
+            if (d.status === 'ok') {
+                document.getElementById('tP').value = d.path;
+                const previewContainer = document.getElementById('previewContainer');
+                previewContainer.innerHTML = `<img id="pI" src="${d.path}" style="width:55px;height:55px;display:block;margin:0 auto 15px;background:#f8f8f8;padding:10px;border-radius:16px;object-fit:cover;box-shadow:0 2px 8px rgba(0,0,0,0.05);">`;
+                document.getElementById('uploadGroup').style.display = 'block';
+                showToast("图片上传成功", "success");
+            } else {
+                showToast("上传失败", "error");
+            }
+        } finally {
+            setModalLoading(false);
+        }
+    }
     
     async function autoFetch() {
         const u = document.getElementById('mU').value.trim();
@@ -782,10 +859,12 @@ upgradeStructure($db);
         try {
             const res = await fetch('?action=fetch_icon_list', { method: 'POST', body: JSON.stringify({ url: targetUrl }) });
             const d = await res.json();
-            if (d.status === 'ok' && d.icons.length > 0) {
+            if (d.status === 'ok' && Array.isArray(d.icons) && d.icons.length > 0) {
                 showIconPicker(d.icons);
             } else {
-                showToast("未找到可用图标", "error");
+                const ug = document.getElementById('uploadGroup');
+                if (ug) ug.style.display = 'block';
+                showToast("未找到可用图标，请手动上传", "error");
             }
         } catch (e) {
             showToast("获取图标列表失败", "error");
@@ -796,17 +875,38 @@ upgradeStructure($db);
 
     function showIconPicker(icons) {
         const previewContainer = document.getElementById('previewContainer');
-        document.getElementById('uploadGroup').style.display = 'none';
-        
+        pickerStats = { total: icons.length, loaded: 0, failed: 0 };
+
         let gridHtml = '<div class="icon-picker-grid">';
-        icons.forEach((url, index) => {
-            gridHtml += `<div class="icon-picker-item" data-url="${url}" onclick="selectPickerIcon(this)" style="display:none;">
-                <img src="${url}" onload="this.parentElement.style.display='flex'; if(!document.querySelector('.icon-picker-item.selected')) this.parentElement.click();" onerror="this.parentElement.remove();">
+        icons.forEach((url) => {
+            const safe = String(url).replace(/&/g, '&amp;').replace(/"/g, '&quot;');
+            gridHtml += `<div class="icon-picker-item" data-url="${safe}" onclick="selectPickerIcon(this)" style="display:none;">
+                <img src="${safe}" onload="onPickerIconLoad(this)" onerror="onPickerIconError(this, ${icons.length})">
             </div>`;
         });
         gridHtml += '</div><div style="display:flex;gap:10px;"><button class="btn btn-s" style="flex:1" onclick="cancelIconPicker()">取消</button><button class="btn btn-p" style="flex:1" onclick="applyPickerIcon()">应用</button></div>';
         
         previewContainer.innerHTML = gridHtml;
+    }
+
+    function onPickerIconLoad(img) {
+        const item = img.parentElement;
+        item.style.display = 'flex';
+        const ug = document.getElementById('uploadGroup');
+        if (ug) ug.style.display = 'none';
+        if (!document.querySelector('.icon-picker-item.selected')) item.click();
+        if (pickerStats) pickerStats.loaded++;
+    }
+
+    function onPickerIconError(img, total) {
+        img.parentElement.remove();
+        if (!pickerStats) return;
+        pickerStats.failed++;
+        if (pickerStats.loaded === 0 && pickerStats.failed >= total) {
+            const ug = document.getElementById('uploadGroup');
+            if (ug) ug.style.display = 'block';
+            showToast("图标全部加载失败，请手动上传", "error");
+        }
     }
 
     function selectPickerIcon(el) {
@@ -841,9 +941,11 @@ upgradeStructure($db);
                 document.getElementById('uploadGroup').style.display = 'block';
                 showToast("图标应用成功", "success");
             } else {
-                showToast("图标下载失败", "error");
+                document.getElementById('uploadGroup').style.display = 'block';
+                showToast("图标下载失败，请换一个或手动上传", "error");
             }
         } catch (e) {
+            document.getElementById('uploadGroup').style.display = 'block';
             showToast("网络请求失败", "error");
         } finally {
             fBtn.innerText = "抓取"; fBtn.disabled = false;
@@ -962,23 +1064,10 @@ upgradeStructure($db);
 
     document.addEventListener('dragend', (e) => {
         stopAutoScroll();
+        // 先移除拖拽态，保证即便 !isDropped 时重渲染出的 grid 也没有延伸 padding
+        document.body.classList.remove('dragging-item', 'dragging-section');
+        // 兜底：未成功投放（拖到空白处/取消）→ 不做任何数据移动，仅刷新视觉状态
         if (!isDropped) {
-            if (dragType === 'item' && currentlyDraggedId) {
-                const targetSection = activeFolder ? activeFolder.sections[0] : db[activeIdx].sections[0];
-                if (targetSection) moveItem(currentlyDraggedId, 'section', targetSection.id, null);
-            } else if (dragType === 'section' && currentlyDraggedSectionId) {
-                const container = getCurrentContext();
-                if (container && container.sections) {
-                    let movedSec = null;
-                    for(let f of db) {
-                        let idx = f.sections.findIndex(s=>s.id===currentlyDraggedSectionId);
-                        if(idx!==-1) { movedSec = f.sections.splice(idx,1)[0]; break; }
-                        for(let s of f.sections) for(let it of s.items) if(it.type==='folder') { let si = it.sections.findIndex(x=>x.id===currentlyDraggedSectionId); if(si!==-1){movedSec=it.sections.splice(si,1)[0];break;} }
-                    }
-                    if(movedSec) container.sections.push(movedSec);
-                }
-            }
-            saveDB();
             renderContent();
         }
         

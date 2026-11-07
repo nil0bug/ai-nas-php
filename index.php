@@ -483,6 +483,7 @@ upgradeStructure($db);
             const isShift = e.shiftKey;
 
             if (isShift && lastClickedId) {
+                // Shift 范围选择
                 const items = getCurrentContext().sections.flatMap(s => s.items);
                 const startIdx = items.findIndex(i => i.id === lastClickedId);
                 const endIdx = items.findIndex(i => i.id === id);
@@ -492,13 +493,19 @@ upgradeStructure($db);
                     for (let i = min; i <= max; i++) selectedIds.add(items[i].id);
                 }
                 pendingEditItem = null;
-            } else if (selectedIds.size > 0) {
-                if (selectedIds.has(id)) selectedIds.delete(id); else selectedIds.add(id);
-                lastClickedId = id;
-            } else if (pendingEditItem === item) {
-                openAddModal(item); pendingEditItem = null;
+            } else if (selectedIds.has(id) && selectedIds.size === 1 && lastClickedId === id) {
+                // 再次单击已选中的同一图标 → 打开编辑
+                selectedIds.clear();
+                pendingEditItem = null;
+                renderContent();
+                openAddModal(item);
+                return;
             } else {
-                pendingEditItem = item; lastClickedId = id;
+                // 单击即选中：红框 + 顶部「删除(N)」按钮立即出现
+                if (selectedIds.has(id)) selectedIds.delete(id);
+                else selectedIds.add(id);
+                lastClickedId = id;
+                pendingEditItem = null;
             }
         } else {
             if (item.type === 'folder') { activeFolder = item; renderContent(); } 

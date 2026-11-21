@@ -209,7 +209,11 @@ upgradeStructure($db);
         .modal.show .modal-content { transform: scale(1); }
         .form-group { margin-bottom: 15px; }
         .form-group label { display: block; font-size: 11px; color: #888; margin: 0 0 5px 5px; font-weight: bold; }
-        .form-group input, .form-group select { width: 100%; padding: 12px; border: 1px solid #f0f0f0; border-radius: 14px; box-sizing: border-box; outline: none; background: #f9f9f9; font-size: 14px; }
+        .form-group input, .form-group select { width: 100%; padding: 12px; border: 1px solid #f0f0f0; border-radius: 14px; box-sizing: border-box; outline: none; background: #f9f9f9; font-size: 14px; transition: border-color 0.2s, background 0.2s; }
+        /* 必填字段抖动动画 + 边框高亮 */
+        @keyframes shake { 0%,100% { transform: translateX(0); } 20%,60% { transform: translateX(-6px); } 40%,80% { transform: translateX(6px); } }
+        .field-shake { animation: shake 0.4s ease-in-out; border-color: var(--danger) !important; background: rgba(255,77,79,0.08) !important; }
+        .req-star { color: var(--danger); margin-left: 2px; }
         .btn { border: none; padding: 11px 18px; border-radius: 14px; cursor: pointer; font-weight: bold; font-size: 13px; transition: 0.2s; }
         .btn:active { transform: scale(0.96); }
         .btn-p { background: var(--accent); color: white; }
@@ -324,6 +328,16 @@ upgradeStructure($db);
         toast.className = 'toast ' + type;
         setTimeout(() => toast.classList.add('show'), 10);
         setTimeout(() => toast.classList.remove('show'), 3000);
+    }
+
+    // 输入框抖动 + 边框高亮（保存校验失败用）
+    function shakeField(el) {
+        if (!el) return;
+        el.classList.remove('field-shake');
+        void el.offsetWidth; // 强制 reflow 使动画可重放
+        el.classList.add('field-shake');
+        setTimeout(() => el.classList.remove('field-shake'), 600);
+        try { el.focus(); } catch (e) {}
     }
 
     function upgradeStructureJS(data) {
@@ -774,9 +788,9 @@ upgradeStructure($db);
             <input type="hidden" id="tP" value="${existingItem ? (existingItem.icon || '') : ''}">
             ${typeSelector}
             ${isNew ? `<div class="form-group"><label>添加到区块</label><select id="targetSection">${sectionOptions}</select></div>` : ''}
-            <div class="form-group"><label>名称 (最多7字)</label><input type="text" id="mN" value="${existingItem ? existingItem.name : ''}" maxlength="7" placeholder="输入名称"></div>
-            <div class="form-group" id="urlGroup" ${initialType==='folder' ? 'style="display:none"' : ''}><label>链接 / 端口</label><div style="display:flex;gap:8px"><input type="text" id="mU" value="${existingItem ? (existingItem.url || '') : ''}" placeholder="http:// 或 端口号"><button class="btn btn-s" id="fBtn" onclick="autoFetch()" style="white-space:nowrap;">抓取</button></div></div>
-            <div class="form-group" id="uploadGroup" ${initialType==='folder' ? 'style="display:none"' : ''}><label>自定义图片</label><input type="file" id="mF" accept="image/*" onchange="uploadFile()"></div>
+            <div class="form-group"><label>名称 (最多7字)<span class="req-star">*</span></label><input type="text" id="mN" value="${existingItem ? existingItem.name : ''}" maxlength="7" placeholder="输入名称"></div>
+            <div class="form-group" id="urlGroup" ${initialType==='folder' ? 'style="display:none"' : ''}><label>链接 / 端口<span class="req-star">*</span></label><div style="display:flex;gap:8px"><input type="text" id="mU" value="${existingItem ? (existingItem.url || '') : ''}" placeholder="http:// 或 端口号"><button class="btn btn-s" id="fBtn" onclick="autoFetch()" style="white-space:nowrap;">抓取</button></div></div>
+            <div class="form-group" id="uploadGroup" ${initialType==='folder' ? 'style="display:none"' : ''}><label>自定义图片（可选）</label><input type="file" id="mF" accept="image/*" onchange="uploadFile()"></div>
             <div style="display:flex;gap:10px;margin-top:20px;"><button class="btn btn-s" style="flex:1" onclick="closeUI()">取消</button><button class="btn btn-p" id="saveBtn" style="flex:1" onclick="saveItem(${isNew}, '${existingItem ? existingItem.id : 'new'}')">保存</button></div>
         `); 
     }
@@ -795,16 +809,28 @@ upgradeStructure($db);
         }
     }
 
+    // 保存逻辑：必填校验失败时不关闭弹窗，抖动对应输入框并提示；图标非必填
     function saveItem(isNew, id) {
-        const n = document.getElementById('mN').value.trim();
+        const nInput = document.getElementById('mN');
+        const uInput = document.getElementById('mU');
+        const n = nInput ? nInput.value.trim() : '';
         const type = document.getElementById('mType').value;
-        const u = type === 'link' ? document.getElementById('mU').value.trim() : '';
+        const u = (type === 'link' && uInput) ? uInput.value.trim() : '';
         const p = document.getElementById('tP').value;
         const targetSectionId = isNew ? document.getElementById('targetSection').value : null;
-        if(!n) return showError("名称不能为空");
+
+        // 必填校验：名称、链接（仅 link 类型）；图标允许为空
+        const missing = [];
+        if (!n) { shakeField(nInput); missing.push('名称'); }
+        if (type === 'link' && !u) { shakeField(uInput); missing.push('链接'); }
+        if (missing.length > 0) {
+            showToast("请填写必填项：" + missing.join('、'), "error");
+            return; // 不关闭弹窗
+        }
+
         if (isNew) {
             const section = getCurrentContext().sections.find(s => s.id === targetSectionId);
-            if (!section) return showError("未找到目标区块");
+            if (!section) { showToast("未找到目标区块", "error"); return; }
             const newItem = { id: 'i_' + Math.random().toString(36).substr(2, 9), name: n, type: type, url: u };
             if (type === 'link') newItem.icon = p || '/icons/default.png';
             if (type === 'folder') newItem.sections = [{ id: 's_sub_' + Math.random().toString(36).substr(2, 9), title: '默认区块', items: [] }];
